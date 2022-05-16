@@ -1,0 +1,6 @@
+{
+    "program": "epicl0.p4",
+    "logfile": "mininet.log",
+    "switch_config": "config.json",
+    "pcap_dump": "pcap"
+}

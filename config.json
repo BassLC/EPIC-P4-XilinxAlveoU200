@@ -1,0 +1,10 @@
+{
+    "tables": {
+        "name1" : {
+            "action" : {
+                "key" : "value"
+            }
+        },
+        "name2": {}
+    }
+}
