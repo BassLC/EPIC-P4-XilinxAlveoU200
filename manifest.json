@@ -1,6 +1,37 @@
 {
-    "program": "epicl0.p4",
-    "logfile": "mininet.log",
-    "switch_config": "config.json",
-    "pcap_dump": "pcap"
+    "nodes": [
+        {
+            "name": "h1",
+            "type": "P4Host",
+            "pcap": "pcap/",
+            "ip": "10.0.1.1",
+            "program": "scripts/epicl0_pkt_generator.py --dst-addr 10.0.2.1 --src-addr 10.0.1.1 --iface h1-eth0"
+
+        },
+        {
+            "name": "s1",
+            "type": "P4Switch",
+            "program": "epicl0.p4",
+            "pcap": "pcap/",
+            "log_file": "/tmp/s1.log",
+            "config": {
+                "tables": {
+                    "cons_egress_to_port": {
+                        "fix_packet": {"0": 1}
+                    },
+                    "deliver_if_local_packet": {
+                        "deliver_packet_locally": {"1 2": 2}
+                    }
+                }
+            }
+        },
+        {
+            "name": "h2",
+            "type": "P4Host",
+            "pcap": "pcap/",
+            "ip": "10.0.2.1"
+        }
+    ],
+    "links": [["h1", "s1"], ["s1", "h2"]],
+    "logfile": "mininet.log"
 }

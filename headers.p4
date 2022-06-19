@@ -1,3 +1,40 @@
+// Headers for Ethernet/IPv4/UDP
+typedef bit<48> ethernet_address_t;
+
+header ethernet_t {
+    ethernet_address_t dest_mac_addr;
+    ethernet_address_t source_mac_addr;
+    bit<16> ether_type;
+}
+
+typedef bit<32> ipv4_address_t;
+
+header ipv4_t {
+    bit<4> version;
+    bit<4> ihl;
+    bit<8> tos;
+    bit<16> total_length;
+    bit<16> id;
+    bit<3> flags;
+    bit<13> fragment_offset;
+    bit<8> ttl;
+    bit<8> protocol;
+    bit<16> header_checksum;
+    ipv4_address_t srcAddr;
+    ipv4_address_t dstAddr;
+}
+
+typedef bit<16> udp_port_t;
+
+header udp_t {
+    udp_port_t source_port;
+    udp_port_t dest_port;
+    bit<16> length_;
+    bit<16> checksum;
+}
+
+
+// Headers for EPIC
 header epic_common_header_t {
     bit<4> version;
     bit<8> qos;

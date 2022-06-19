@@ -2,14 +2,20 @@
 #include <core.p4>
 #include "headers.p4"
 
+#define CPU_PORT 64
+typedef bit<9> PortId_t;
+
 struct epicl0_header_t {
+    ethernet_t ethernet;
+    ipv4_t ipv4;
+    udp_t udp;
     epic_common_header_t common;
     epic_address_header_t address;
     epic_path_type_header_t path;
 }
 
 struct metadata_t {
-    bit<6> number_of_hop_fields;
+    bit<6> total_number_of_hop_fields;
     bit<6> garbage_hop_fields;
     bit<2> info_fields;
 }
@@ -23,6 +29,13 @@ error {
 
 parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout metadata_t meta, inout standard_metadata_t stdmeta) {
     state start {
+        transition parse_encapsulating_headers;
+    }
+
+    state parse_encapsulating_headers {
+        packet.extract(epic_packet.ethernet);
+        packet.extract(epic_packet.ipv4);
+        packet.extract(epic_packet.udp);
         transition parse_common_header;
     }
 
@@ -57,15 +70,14 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
 
         // If segX_len == 0 and Y > X then segY_len can't be bigger than 0
         verify(!(epic_packet.path.meta.seg0_len == 0 && epic_packet.path.meta.seg1_len > 0), error.EpicInvalidSegmentLengths);
-        
         verify(!(epic_packet.path.meta.seg1_len == 0 && epic_packet.path.meta.seg2_len > 0), error.EpicInvalidSegmentLengths);
         
-        meta.number_of_hop_fields = epic_packet.path.meta.seg0_len +
+        meta.total_number_of_hop_fields = epic_packet.path.meta.seg0_len +
                                     epic_packet.path.meta.seg1_len +
                                     epic_packet.path.meta.seg2_len;
         
         meta.garbage_hop_fields = epic_packet.path.meta.curr_hf;
-        
+
         // We assume that at least 1 Info Field exist (meaning that seg0_len > 0).
         // According to the SCION documentation:
         // "segi_len > 0 implies the existance of Info Field i"
@@ -82,14 +94,14 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
     state parse_info_field_1 {
         meta.info_fields = 1;
         packet.extract(epic_packet.path.info1);
-        transition parse_hop_fields_begin;
+        transition parse_hop_fields_start;
     }
 
     state parse_info_field_2 {
         meta.info_fields = 2;
         packet.extract(epic_packet.path.info1);
         packet.extract(epic_packet.path.info2);
-        transition parse_hop_fields_begin;
+        transition parse_hop_fields_start;
     }
 
     state parse_info_field_3 {
@@ -97,11 +109,11 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
         packet.extract(epic_packet.path.info1);
         packet.extract(epic_packet.path.info2);
         packet.extract(epic_packet.path.info3);
-        transition parse_hop_fields_begin;
+        transition parse_hop_fields_start;
     }
 
     
-    state parse_hop_fields_begin {
+    state parse_hop_fields_start {
         // @FIXME only handle 4 hop fields
         // We start by extracting the garbage hop fields: hop fields
         // that we do not have a need for. If there are 0 of these
@@ -128,16 +140,17 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
     state parse_hop_field_trash_2_before {
         packet.extract(epic_packet.path.hf_garbage_2_before);
         meta.garbage_hop_fields = meta.garbage_hop_fields - 2;
-        transition parse_hop_fields_begin;
+        transition parse_hop_fields_start;
     }
 
     state parse_hop_field {
         packet.extract(epic_packet.path.hop_field);
-        meta.garbage_hop_fields = meta.number_of_hop_fields - meta.garbage_hop_fields - 1;
+        meta.garbage_hop_fields = meta.total_number_of_hop_fields - meta.garbage_hop_fields - 1;
         transition parse_hop_field_trash_after;
     }
 
     state parse_hop_field_trash_after {
+        stdmeta.egress_spec = stdmeta.ingress_port;
         transition select(meta.garbage_hop_fields) {
             0: accept;
             1: parse_hop_field_trash_1_after;
@@ -168,19 +181,85 @@ control EpicL0PipeIngress(inout epicl0_header_t epic_header,
     inout metadata_t meta,
     inout standard_metadata_t standard_metadata) {
 
-    action abort(bit<1> n) {
+    AESMAC() mac;
+
+    action drop_packet() {
         mark_to_drop(standard_metadata);
     }
 
-    table hello_world {
-        key = {epic_header.common.version: exact;}
-        actions = {
-            abort;
+    action send_to_cpu() {
+        standard_metadata.egress_spec = CPU_PORT;
+    }
+    
+    action fix_packet(PortId_t port) {
+        bit<6> number_of_hopfields_in_segment = 0;
+        if (epic_header.path.meta.curr_inf == 1) {
+            number_of_hopfields_in_segment = epic_header.path.meta.seg0_len;
+        } else if (epic_header.path.meta.curr_inf == 2) {
+            number_of_hopfields_in_segment = epic_header.path.meta.seg1_len;
+        } else {
+            number_of_hopfields_in_segment = epic_header.path.meta.seg2_len;
         }
+
+        if (epic_header.path.meta.curr_hf < number_of_hopfields_in_segment) {
+            epic_header.path.meta.curr_hf = epic_header.path.meta.curr_hf + 1;
+        } else {
+            epic_header.path.meta.curr_hf = 0;
+            epic_header.path.meta.curr_inf = epic_header.path.meta.curr_inf + 1;
+        }
+
+        standard_metadata.egress_spec = port;
+    }
+    
+    table cons_egress_to_port {
+        key = {
+            epic_header.path.hop_field.cons_egress: exact;
+        }
+
+        actions = {
+            NoAction;
+            fix_packet;
+        }
+
+        default_action = NoAction;
+        size = 64;
+    }
+    
+    action deliver_packet_locally(PortId_t port) {
+        standard_metadata.egress_spec = port;
+    }
+
+    // Checks if a packet is for the local AS/ISD. If not, drop the packet.
+    table deliver_if_local_packet {
+        key = {
+            epic_header.address.dst_isd: exact;
+            epic_header.address.dst_as: exact;
+        }
+
+        actions = {
+            deliver_packet_locally;
+            drop_packet;
+        }
+
+        default_action = drop_packet;
     }
 
     apply {
-        hello_world.apply();
+        bit<128> output;
+        bit<128> mac_key = 1;
+        bit<128> data_to_encode = 2;
+        mac.mac(mac_key,data_to_encode, output);
+        output = 0; // @TODO: change this to use the MAC result
+
+        bit<48> truncated_mac = (bit<48>)output;
+        if (truncated_mac == epic_header.path.hop_field.mac) {
+            bool no_egress_port = cons_egress_to_port.apply().miss;
+            if (no_egress_port) {
+                deliver_if_local_packet.apply();
+            }
+        } else {
+            send_to_cpu();
+        }
     }
 }
 
@@ -196,7 +275,9 @@ control EmptyComputeChecksum(inout epicl0_header_t hdr,
 }
 
 control EmptyDeparser(packet_out p, in epicl0_header_t hdr){
-    apply{}
+    apply{
+        p.emit(hdr);
+    }
 }
 
 V1Switch(EpicL0Parser(), EmptyVerifyChecksum(), EpicL0PipeIngress(), EmptyEgress(), EmptyComputeChecksum(), EmptyDeparser()) main;
