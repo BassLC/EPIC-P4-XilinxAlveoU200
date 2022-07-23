@@ -137,10 +137,12 @@ def _generate_epicl0_empty_packet():
     common = __generate_epicl0_common_header(header_len=15, payload_len=0)
     address = __generate_epicl0_address_header(90, 91, IPv4Address("0.0.0.0"),
                                                70, 71, IPv4Address("1.1.1.1"))
-    path_meta = __generate_epicl0_path_meta_header(0, 0, 1, 0, 0)
-    info_field = __generate_epicl0_info_field(0, 123456789)
-    hop_field = __generate_epicl0_hop_field(0, 0, 0, 0)
-    return common + address + path_meta + info_field + hop_field
+    path_meta = __generate_epicl0_path_meta_header(0, 0, 6, 0, 0)
+    info_field = __generate_epicl0_info_field(65, 123456789)
+    hop_fields = []
+    for i in range(7):
+        hop_fields += __generate_epicl0_hop_field(0, 0, 0, i)
+    return common + address + path_meta + info_field + hop_fields
 
 
 class EPICL0(Packet):

@@ -92,6 +92,18 @@ header epic_hop_field_header_t {
     bit<48> mac;
 }
 
+header hop_field_garbage_16_t {
+    bit<(16*HOP_FIELD_SIZE)> hop_field_byte_buffer_2;
+}
+
+header hop_field_garbage_8_t {
+    bit<(8*HOP_FIELD_SIZE)> hop_field_byte_buffer_2;
+}
+
+header hop_field_garbage_4_t {
+    bit<(4*HOP_FIELD_SIZE)> hop_field_byte_buffer_2;
+}
+
 header hop_field_garbage_2_t {
     bit<(2*HOP_FIELD_SIZE)> hop_field_byte_buffer_2;
 }
@@ -110,13 +122,21 @@ struct epic_path_type_header_t {
     epic_info_field_header_t info1;
     epic_info_field_header_t info2;
     epic_info_field_header_t info3;
-    // @TODO: there can be between 1 and 64 hop fields,
+    // There can be between 1 and 64 hop fields,
     // We only need to extract our field, and the rest can be parsed
     // into byte buffers
-    // For now I'll only handle 4 hop fields
+    hop_field_garbage_16_t hf_garbage_16_before;
+    hop_field_garbage_8_t hf_garbage_8_before;
+    hop_field_garbage_4_t hf_garbage_4_before;
     hop_field_garbage_2_t hf_garbage_2_before;
     hop_field_garbage_1_t hf_garbage_1_before;
-    epic_hop_field_header_t hop_field;
+
+    epic_hop_field_header_t hop_field_last;
+    epic_hop_field_header_t hop_field_curr;
+
+    hop_field_garbage_16_t hf_garbage_16_after;
+    hop_field_garbage_8_t hf_garbage_8_after;
+    hop_field_garbage_4_t hf_garbage_4_after;
     hop_field_garbage_2_t hf_garbage_2_after;
     hop_field_garbage_1_t hf_garbage_1_after;
 }

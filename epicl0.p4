@@ -18,6 +18,7 @@ struct metadata_t {
     bit<6> total_number_of_hop_fields;
     bit<6> garbage_hop_fields;
     bit<2> info_fields;
+    bool last_hopfield_present;
 }
 
 error {
@@ -51,9 +52,6 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
     state parse_address_header {
         // @TODO check DT/ST/DL/SL for address type
         packet.extract(epic_packet.address);
-        // @TODO add verificaion for (dst/src)_(isd/as) from
-        // tables (if the isd/as is not in the table, discard
-        // the packet)
 
         transition parse_path_type_header;
     }
@@ -76,8 +74,7 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
                                     epic_packet.path.meta.seg1_len +
                                     epic_packet.path.meta.seg2_len;
         
-        meta.garbage_hop_fields = epic_packet.path.meta.curr_hf;
-
+        meta.garbage_hop_fields = epic_packet.path.meta.curr_hf - 1;
         // We assume that at least 1 Info Field exist (meaning that seg0_len > 0).
         // According to the SCION documentation:
         // "segi_len > 0 implies the existance of Info Field i"
@@ -114,21 +111,31 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
 
     
     state parse_hop_fields_start {
-        // @FIXME only handle 4 hop fields
         // We start by extracting the garbage hop fields: hop fields
         // that we do not have a need for. If there are 0 of these
         // then we are in the right place, and we extract the
         // current hop field, since we are going to do operations
         // based on it. After that, we extract the rest of the hop fields
         // again into garbage byte buffers, and we accept the packet.
-        
-        transition select(meta.garbage_hop_fields) {
-            0: parse_hop_field;
-            1: parse_hop_field_trash_1_before;
-            0x2 &&& 0x2: parse_hop_field_trash_2_before;
+
+        transition select(epic_packet.path.meta.curr_hf, meta.garbage_hop_fields) {
+            (0, _): parse_one_hop_field;
+            (_, 0): parse_hop_field;
+            (_, 16 .. 31): parse_hop_field_trash_16_before;
+            (_, 8 .. 15): parse_hop_field_trash_8_before;
+            (_, 4 .. 7): parse_hop_field_trash_4_before;
+            (_, 2 .. 3): parse_hop_field_trash_2_before;
+            (_, 1): parse_hop_field_trash_1_before;
         }
     }
 
+    state parse_one_hop_field {
+        packet.extract(epic_packet.path.hop_field_curr);
+        meta.last_hopfield_present = false;
+
+        meta.garbage_hop_fields = meta.total_number_of_hop_fields - epic_packet.path.meta.curr_hf - 1;
+        transition parse_hop_field_trash_after;
+    }
     state parse_hop_field_trash_1_before {
         packet.extract(epic_packet.path.hf_garbage_1_before);
         
@@ -143,18 +150,41 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
         transition parse_hop_fields_start;
     }
 
+    state parse_hop_field_trash_4_before {
+        packet.extract(epic_packet.path.hf_garbage_4_before);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 4;
+        transition parse_hop_fields_start;
+    }
+
+    state parse_hop_field_trash_8_before {
+        packet.extract(epic_packet.path.hf_garbage_8_before);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 8;
+        transition parse_hop_fields_start;
+    }
+
+    state parse_hop_field_trash_16_before {
+        packet.extract(epic_packet.path.hf_garbage_16_before);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 16;
+        transition parse_hop_fields_start;
+    }
+
     state parse_hop_field {
-        packet.extract(epic_packet.path.hop_field);
-        meta.garbage_hop_fields = meta.total_number_of_hop_fields - meta.garbage_hop_fields - 1;
+        packet.extract(epic_packet.path.hop_field_last);
+        packet.extract(epic_packet.path.hop_field_curr);
+        meta.last_hopfield_present = true;
+
+        meta.garbage_hop_fields = meta.total_number_of_hop_fields - epic_packet.path.meta.curr_hf - 1;
         transition parse_hop_field_trash_after;
     }
 
     state parse_hop_field_trash_after {
-        stdmeta.egress_spec = stdmeta.ingress_port;
         transition select(meta.garbage_hop_fields) {
             0: accept;
             1: parse_hop_field_trash_1_after;
-            0x2 &&& 0x2: parse_hop_field_trash_2_after;
+            2 .. 3: parse_hop_field_trash_2_after;
+            4 .. 7: parse_hop_field_trash_4_after;
+            8 .. 15: parse_hop_field_trash_8_after;
+            15 .. 31: parse_hop_field_trash_16_after;
         }
     }
 
@@ -170,6 +200,24 @@ parser EpicL0Parser(packet_in packet, out epicl0_header_t epic_packet, inout met
         transition parse_hop_field_trash_after;
     }
     
+    state parse_hop_field_trash_4_after {
+        packet.extract(epic_packet.path.hf_garbage_4_after);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 4;
+        transition parse_hop_field_trash_after;
+    }
+
+    state parse_hop_field_trash_8_after {
+        packet.extract(epic_packet.path.hf_garbage_8_after);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 8;
+        transition parse_hop_field_trash_after;
+    }
+
+    state parse_hop_field_trash_16_after {
+        packet.extract(epic_packet.path.hf_garbage_16_after);
+        meta.garbage_hop_fields = meta.garbage_hop_fields - 16;
+        transition parse_hop_field_trash_after;
+    }
+    
 }
 
 control EmptyVerifyChecksum(inout epicl0_header_t hdr,
@@ -182,6 +230,7 @@ control EpicL0PipeIngress(inout epicl0_header_t epic_header,
     inout standard_metadata_t standard_metadata) {
 
     AESMAC() mac;
+    register<bit<128>>(1) mac_key_reg;
 
     action drop_packet() {
         mark_to_drop(standard_metadata);
@@ -190,12 +239,37 @@ control EpicL0PipeIngress(inout epicl0_header_t epic_header,
     action send_to_cpu() {
         standard_metadata.egress_spec = CPU_PORT;
     }
+
+    action epicl0_get_data_block(out bit<128> data_to_encode) {
+        data_to_encode = 0;
+        bit<16> beta_i = 0;
+        bit<32> timestamp = 0;
+        if (epic_header.path.meta.curr_inf == 0) {
+            beta_i = epic_header.path.info1.seg_id;
+            timestamp = epic_header.path.info1.timestamp;
+        } else if (epic_header.path.meta.curr_inf == 1) {
+            beta_i = epic_header.path.info2.seg_id;
+            timestamp = epic_header.path.info2.timestamp;
+        } else {
+            beta_i = epic_header.path.info3.seg_id;
+            timestamp = epic_header.path.info3.timestamp;
+        }
+        data_to_encode[31:16] = beta_i;
+        data_to_encode[63:32] = timestamp;
+        data_to_encode[79:72] = epic_header.path.hop_field_curr.exp_time;
+        data_to_encode[95:80] = epic_header.path.hop_field_curr.cons_ingress;
+        data_to_encode[111:96] = epic_header.path.hop_field_curr.cons_egress;
+    }
+
+    // action epicl1_get_data_block(out bit<128> data_to_encode) {
+    //     data_to_encode = 0;
+    // }
     
     action fix_packet(PortId_t port) {
         bit<6> number_of_hopfields_in_segment = 0;
-        if (epic_header.path.meta.curr_inf == 1) {
+        if (epic_header.path.meta.curr_inf == 0) {
             number_of_hopfields_in_segment = epic_header.path.meta.seg0_len;
-        } else if (epic_header.path.meta.curr_inf == 2) {
+        } else if (epic_header.path.meta.curr_inf == 1) {
             number_of_hopfields_in_segment = epic_header.path.meta.seg1_len;
         } else {
             number_of_hopfields_in_segment = epic_header.path.meta.seg2_len;
@@ -213,7 +287,7 @@ control EpicL0PipeIngress(inout epicl0_header_t epic_header,
     
     table cons_egress_to_port {
         key = {
-            epic_header.path.hop_field.cons_egress: exact;
+            epic_header.path.hop_field_curr.cons_egress: exact;
         }
 
         actions = {
@@ -244,22 +318,57 @@ control EpicL0PipeIngress(inout epicl0_header_t epic_header,
         default_action = drop_packet;
     }
 
-    apply {
-        bit<128> output;
-        bit<128> mac_key = 1;
-        bit<128> data_to_encode = 2;
-        mac.mac(mac_key,data_to_encode, output);
-        output = 0; // @TODO: change this to use the MAC result
-
-        bit<48> truncated_mac = (bit<48>)output;
-        if (truncated_mac == epic_header.path.hop_field.mac) {
-            bool no_egress_port = cons_egress_to_port.apply().miss;
-            if (no_egress_port) {
-                deliver_if_local_packet.apply();
-            }
-        } else {
-            send_to_cpu();
+    table check_ingress_port {
+        key = {
+            epic_header.path.hop_field_last.cons_egress: exact;
+            standard_metadata.ingress_port: exact;
         }
+        actions = {
+            NoAction;
+        }
+
+        default_action = NoAction;
+    }
+
+    apply {
+        mac_key_reg.write(0, 12345);
+        if (standard_metadata.parser_error != error.NoError) {
+            drop_packet();
+        } else {
+            // standard_metadata.egress_spec = standard_metadata.ingress_port;
+            bool skip_processing = false;
+            if (meta.last_hopfield_present) {
+                bool ingress_port_is_invalid = check_ingress_port.apply().miss;
+
+                if (ingress_port_is_invalid) {
+                    drop_packet();
+                    skip_processing = true;
+                }
+            }
+
+            if (!skip_processing) {
+                bit<128> mac_key;
+                mac_key_reg.read(mac_key, 0);
+
+                bit<128> data_to_encode;
+                epicl0_get_data_block(data_to_encode);
+
+                bit<128> output;
+                mac.mac(mac_key, data_to_encode, output);
+                output = 0; // @TODO: change this to use the MAC result
+
+                bit<48> truncated_mac = (bit<48>)output;
+                if (truncated_mac == epic_header.path.hop_field_curr.mac) {
+                    bool no_egress_port = cons_egress_to_port.apply().miss;
+                    if (no_egress_port) {
+                        deliver_if_local_packet.apply();
+                    }
+                } else {
+                    send_to_cpu();
+                }
+            }
+        }
+        
     }
 }
 
